@@ -1,0 +1,168 @@
+from kfp import dsl
+from kfp import compiler
+from kubernetes.client import models as k8s
+import os
+import yaml
+import time
+
+# Define a shared volume for storing task statuses
+shared_volume = dsl.PipelineVolume(volume=k8s.V1Volume(
+    name="shared-volume",
+    empty_dir=k8s.V1EmptyDirVolumeSource()
+))
+
+
+# Helper function to generate unique Spark application names
+def generate_spark_app_name(task_name):
+    return f"{task_name}-{int(time.time())}"
+
+
+# Spark monitoring graph component
+@dsl.graph_component
+def monitor_spark_task(task_name):
+    spark_application_name = generate_spark_app_name(task_name)
+    monitor_task = dsl.ContainerOp(
+        name=f"monitor-{task_name}",
+        image="alpine",
+        command=["sh", "-c"],
+        arguments=[
+            f"""
+            while true; do
+                status=$(kubectl get sparkapplication {spark_application_name} -o jsonpath='{{{{.status.applicationState.state}}}}')
+                echo "Current status: $status"
+                if [ "$status" == "COMPLETED" ]; then
+                    echo "Spark job completed successfully!"
+                    exit 0
+                elif [ "$status" == "FAILED" ]; then
+                    echo "Spark job failed."
+                    exit 1
+                else
+                    echo "Spark job is still running. Retrying in 30 seconds..."
+                    sleep 30
+                fi
+            done
+            """
+        ],
+        pvolumes={"/kfp_tmp": shared_volume}
+    )
+    return monitor_task
+
+
+{% for stage_list in stages %}
+{% for stage in stage_list %}
+def {{ stage | replace("-", "_") }}(
+    {% for param in input_params.keys() %}{{ param }}{% if not loop.last %}, {% endif %}{% endfor %}):
+    task_resources = {{ resources[stage] | tojson }}
+
+    if task_resources['operator'] == 'pod':
+        # Task is a pod
+        op = dsl.ContainerOp(
+            name="{{ stage }}",
+            image="{{ image }}",
+            command=["/bin/bash", "-c", """
+                    /app/entrypoint.sh
+                    status=$?
+                    echo "$status" >> /mystatus/status.txt
+                    sleep 30
+                    exit $status
+                """]
+        )
+        op.set_cpu_limit(str(task_resources['d_resources']['CPU_ENV_VAR_MAX']))
+        op.set_cpu_request(str(task_resources['d_resources']['CPU_ENV_VAR_MIN']))
+        op.set_memory_request(str(task_resources['d_resources']['RAM_ENV_VAR_MIN']) + '000M')
+        op.set_memory_limit(str(task_resources['d_resources']['RAM_ENV_VAR_MAX']) + '000M')
+
+        {% if task_resources['type'] == 'GPU' %}
+        op.set_gpu_limit(str(task_resources['d_resources']['GPU_ENV_VAR']))
+        {% endif %}
+
+        op.add_pvolumes({
+            "/efs/shared": dsl.PipelineVolume(pvc='{{ pvc }}'),
+            "/kfp_tmp": shared_volume
+        })
+
+        return op
+
+    elif task_resources['operator'] == 'spark':
+        # Task is a Spark job
+        spark_inputs = yaml.safe_load(open("spark_inputs.yaml"))
+        task_spark_input = spark_inputs.get("{{ stage }}", {})
+        spark_application_name = generate_spark_app_name("{{ stage }}")
+
+        # Generate Spark manifest
+        spark_manifest = {
+            "apiVersion": "sparkoperator.k8s.io/v1beta2",
+            "kind": "SparkApplication",
+            "metadata": {
+                "name": spark_application_name,
+                "namespace": "default"
+            },
+            "spec": {
+                "type": "Scala",
+                "mode": "cluster",
+                "image": "your-spark-image",
+                "mainClass": task_spark_input.get("mainclass", ""),
+                "arguments": task_spark_input.get("arguments", []),
+                "driver": {
+                    "cores": 1,
+                    "memory": "512m",
+                    "labels": {"version": "2.4.0"},
+                    "serviceAccount": "spark"
+                },
+                "executor": {
+                    "cores": 1,
+                    "instances": 2,
+                    "memory": "1g",
+                    "labels": {"version": "2.4.0"}
+                }
+            }
+        }
+
+        # Write manifest to file
+        with open(f"{stage}.spark.yaml", "w") as f:
+            yaml.dump(spark_manifest, f)
+
+        # Submit Spark job
+        submit_spark_job = dsl.ResourceOp(
+            name=f"submit-{stage}",
+            k8s_resource=spark_manifest,
+            action="create"
+        )
+
+        # Monitor Spark job
+        monitor_task = monitor_spark_task("{{ stage }}")
+        monitor_task.after(submit_spark_job)
+
+        return monitor_task
+{% endfor %}
+{% endfor %}
+
+@dsl.pipeline(
+    name='{{ pipeline_name }}',
+    description='{{ pipeline_description }}'
+)
+def pipeline(
+    {% for param in input_params.keys() %}{{ param }}{% if not loop.last %}, {% endif %}{% endfor %}):
+    stages = {{ stages | tojson }}
+    previous_stage_tasks = []
+
+    for stage in stages:
+        parallel_tasks = []
+
+        for task_name in stage:
+            # Create tasks dynamically based on stage definitions
+            task = globals()[f"{task_name.replace('-', '_')}"](
+                {% for param in input_params.keys() %}{{ param }}{% if not loop.last %}, {% endif %}{% endfor %}
+            )
+            task.execution_options.caching_strategy.max_cache_staleness = "P0D"
+            parallel_tasks.append(task)
+
+            # Dependency management
+            if previous_stage_tasks:
+                for prev_task in previous_stage_tasks:
+                    task.after(prev_task)
+        previous_stage_tasks = parallel_tasks
+
+    dsl.get_pipeline_conf().set_ttl_seconds_after_finished(300)
+
+compiler.Compiler().compile(pipeline, '{{pipeline_name}}_{{ run_name }}.yaml')
