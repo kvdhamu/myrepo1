@@ -1,19 +1,95 @@
 fetch_driver_logs = dsl.ContainerOp(
-    name=spark_logs_job_name,
-    image="{{ image }}",  # Ensure this image has curl installed
+    name=f"fetch-logs-{spark_submit_job_name}",
+    image="{{ image }}",
     command=["sh", "-c"],
     arguments=[
-        "set -ex && "
-        "POD_NAME=$(echo {}) && ".format(submit_spark_job.outputs['driver_pod_name']) +
-        "NAMESPACE=$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace) && " +
-        "TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token) && " +
-        "curl -k -H \"Authorization: Bearer $TOKEN\" " +
-        "\"https://$KUBERNETES_SERVICE_HOST:$KUBERNETES_PORT_443_TCP_PORT/api/v1/namespaces/$NAMESPACE/pods/$POD_NAME/log?container=spark-kubernetes-driver\" " +
-        "-o /tmp/driver.log && " +
-        "cat /tmp/driver.log && " +
-        "sleep 3600"  # Keep container alive for debugging
+        f"echo {submit_spark_job.output} > /tmp/driver_pod.log && "
+        "sleep 36000"
     ],
     file_outputs={
-        "driver_logs": "/tmp/driver.log"  # Output logs to a file
+        "driver_logs": "/tmp/driver_pod.log"
     }
 )
+
+fetch_driver_logs.after(submit_spark_job)  # Ensure it runs after the Spark task
+
+
+
+
+{% if resources[stage]['operator'] == 'spark' %}
+
+submit_spark_job = dsl.ResourceOp(
+    name=spark_submit_job_name,
+    k8s_resource=spark_manifest,
+    action="create",
+    success_condition='status.applicationState.state == COMPLETED',
+    attribute_outputs={
+        "driver_pod_name": "{.status.driverInfo.podName}"
+    }
+)
+
+submit_spark_job.add_pod_label("pipelines.kubeflow.org/cache_enabled", "false")
+submit_spark_job.add_pod_label("pipelines.kubeflow.org/max_cache_staleness", "P0D")
+
+# Fetch driver logs
+fetch_driver_logs = dsl.ContainerOp(
+    name="fetch-logs-{{ stage }}",
+    image="{{ image }}",
+    command=["sh", "-c"],
+    arguments=[
+        f"echo {submit_spark_job.output} > /tmp/driver_pod.log && "
+        "sleep 36000"
+    ],
+    file_outputs={
+        "driver_logs": "/tmp/driver_pod.log"
+    }
+)
+
+fetch_driver_logs.after(submit_spark_job)
+
+return fetch_driver_logs
+{% endif %}
+
+
+
+@dsl.pipeline(
+    name='{{ pipeline_name }}',
+    description='{{ pipeline_description }}'
+)
+def pipeline(
+    {% for param in input_params.keys() %}{{ param }}{% if not loop.last %}, {% endif %}{% endfor %}
+):
+    stages = {{ stages | tojson }}
+    previous_stage_tasks = []
+
+    for stage in stages:
+        parallel_tasks = []
+
+        for task_name in stage:
+            # Create tasks dynamically
+            task = globals()[f"{task_name.replace('-','_')}"](
+                {% for param in input_params.keys() %}{{ param }}{% if not loop.last %}, {% endif %}{% endfor %}
+            )
+            
+            if resources[task_name]['operator'] == 'pod':
+                task.execution_options.caching_strategy.max_cache_staleness = "P0D"
+                task.set_caching_options(False)
+
+            parallel_tasks.append(task)
+
+            # Handle fetch_driver_logs for Spark tasks
+            if resources[task_name]['operator'] == 'spark':
+                # fetch_driver_logs is already returned in the function, retrieve it
+                fetch_driver_logs = task  
+                parallel_tasks.append(fetch_driver_logs)  
+
+            # Dependency management
+            if previous_stage_tasks:
+                for prev_task in previous_stage_tasks:
+                    task.after(prev_task)
+                    if resources[task_name]['operator'] == 'spark':
+                        fetch_driver_logs.after(task)  # Ensure logs task runs after Spark job
+
+        previous_stage_tasks = parallel_tasks
+
+    dsl.get_pipeline_conf().set_ttl_seconds_after_finished(300)
