@@ -1,26 +1,19 @@
-- name: Construct MYPROJ_SPARK_BUILD_JAR_NAME
-  hosts: localhost
-  gather_facts: false
-  tasks:
-    - name: Check if MYPROJ_MANIFEST_VAR_MULTI_MODULE_PRJ is set
-      shell: |
-        if [ -z "${MYPROJ_MANIFEST_VAR_MULTI_MODULE_PRJ}" ]; then
-          echo "PATH of the ARTIFACT: NONE"
-          pkg=$(grep -oPm1 "(?<=<packaging>)[^<]+" {{ gitlab_proj_dir }}/pom.xml)
-          artId=$(grep -oPm1 "(?<=<artifactId>)[^<]+" {{ gitlab_proj_dir }}/pom.xml)
-          verId=$(grep -oPm1 "(?<=<version>)[^<]+" {{ gitlab_proj_dir }}/pom.xml)
-          echo "$artId-$verId.$pkg"
-        else
-          echo "PATH of the ARTIFACT MMP: ${MYPROJ_MANIFEST_VAR_MULTI_MODULE_PRJ}"
-          cd "${MYPROJ_MANIFEST_VAR_MULTI_MODULE_PRJ}"
-          artId=$(sed -n '/<parent>/,/<\/parent>/d; /<plugin>/,/<\/plugin>/d; /<dependency>/,/<\/dependency>/d; /<artifactId>/ { s/.*<artifactId>\(.*\)<\/artifactId>.*/\1/; p; q }' pom.xml)
-          verId=$(sed -n '/<plugin>/,/<\/plugin>/d; /<dependency>/,/<\/dependency>/d; /<version>/ { s/.*<version>\(.*\)<\/version>.*/\1/; p; q }' pom.xml)
-          echo "$artId-$verId.jar"
-        fi
-      register: jar_name_output
-      environment:
-        MYPROJ_MANIFEST_VAR_MULTI_MODULE_PRJ: "{{ MYPROJ_MANIFEST_VAR_MULTI_MODULE_PRJ | default('') }}"
-
-    - name: Export the MYPROJ_SPARK_BUILD_JAR_NAME variable
-      shell: |
-        export MYPROJ_SPARK_BUILD_JAR_NAME="{{ jar_name_output.stdout }}"
+fetch_driver_logs = dsl.ContainerOp(
+    name=spark_logs_job_name,
+    image="{{ image }}",  # Ensure this image has curl installed
+    command=["sh", "-c"],
+    arguments=[
+        "set -ex && "
+        "POD_NAME=$(echo {}) && ".format(submit_spark_job.outputs['driver_pod_name']) +
+        "NAMESPACE=$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace) && " +
+        "TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token) && " +
+        "curl -k -H \"Authorization: Bearer $TOKEN\" " +
+        "\"https://$KUBERNETES_SERVICE_HOST:$KUBERNETES_PORT_443_TCP_PORT/api/v1/namespaces/$NAMESPACE/pods/$POD_NAME/log?container=spark-kubernetes-driver\" " +
+        "-o /tmp/driver.log && " +
+        "cat /tmp/driver.log && " +
+        "sleep 3600"  # Keep container alive for debugging
+    ],
+    file_outputs={
+        "driver_logs": "/tmp/driver.log"  # Output logs to a file
+    }
+)
