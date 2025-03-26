@@ -1,1 +1,22 @@
 
+kfp_venv/lib64/python3.11/site-packages/kfp/dsl/_container_op.py:1261: FutureWarning: Please create reusable components instead of constructing ContainerOp instances directly. Reusable components are shareable, portable and have compatibility and support guarantees. Please see the documentation: https://www.kubeflow.org/docs/pipelines/sdk/component-development/#writing-your-component-definition-file The components can be created manually (or, in case of python, using kfp.components.create_component_from_func or func_to_container_op) and then loaded using kfp.components.load_component_from_file, load_component_from_uri or load_component_from_text: https://kubeflow-pipelines.readthedocs.io/en/stable/source/kfp.components.html#kfp.components.load_component_from_file
+      warnings.warn(
+    Traceback (most recent call last):
+
+kfp_venv/lib64/python3.11/site-packages/kfp/compiler/compiler.py", line 1227, in _create_and_write_workflow
+        workflow = self._create_workflow(pipeline_func, pipeline_name,
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+kfp_venv/lib64/python3.11/site-packages/kfp/compiler/compiler.py", line 1058, in _create_workflow
+        workflow = self._create_pipeline_workflow(
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/kfp_venv/lib64/python3.11/site-packages/kfp/compiler/compiler.py", line 786, in _create_pipeline_workflow
+        templates = self._create_dag_templates(pipeline, op_transformers)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+kfp_venv/lib64/python3.11/site-packages/kfp/compiler/compiler.py", line 729, in _create_dag_templates
+        dependencies = self._get_dependencies(
+                       ^^^^^^^^^^^^^^^^^^^^^^^
+
+kfp_venv/lib64/python3.11/site-packages/kfp/compiler/compiler.py", line 413, in _get_dependencies
+        dependencies[downstream_groups[0]].add(upstream_groups[0])
+                     ~~~~~~~~~~~~~~~~~^^^
+    IndexError: list index out of range
