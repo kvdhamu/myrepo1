@@ -1,0 +1,75 @@
+{% if resources[stage]['operator'] == 'spark' %}
+
+# Setting Spark-specific variables
+spark_app_name = f"kfp-{{ stage }}-"
+spark_submit_job_name = f"spark-{{ stage }}"
+spark_task_params = spark_tasks_params['tasks'].get("{{ stage }}", {})
+
+# Render Spark manifest template
+spark_manifest = yaml.safe_load(spark_manifest_template.render(
+    spark_app_name=spark_app_name,
+    project_namespace=project_namespace,
+    image="{{ image }}",
+    jar_name=jar_name,
+    environment_vars=env_vars,
+    efs_pvc=efs_pvc,
+    env_name=env_name,
+    spark_main_class=spark_task_params.get('mainclass', 'Provide_mainclass_details'),
+    spark_arguments=spark_task_params.get('arguments', []),
+    driver_cpu_limit=str({{ resources[stage]['d_resources']['CPU_ENV_VAR_MAX'] }}),
+    driver_cpu_request=str({{ resources[stage]['d_resources']['CPU_ENV_VAR_MIN'] }}),
+    driver_mem_limit=(str({{ resources[stage]['d_resources']['RAM_ENV_VAR_MAX'] }})+'000M'),
+    driver_mem_request=(str({{ resources[stage]['d_resources']['RAM_ENV_VAR_MIN'] }})+'000M'),
+    executor_cpu_limit=str({{ resources[stage]['e_resources']['CPU_ENV_VAR_MAX'] }}),
+    executor_cpu_request=str({{ resources[stage]['e_resources']['CPU_ENV_VAR_MIN'] }}),
+    executor_mem_limit=(str({{ resources[stage]['e_resources']['RAM_ENV_VAR_MAX'] }})+'000M'),
+    executor_mem_request=(str({{ resources[stage]['e_resources']['RAM_ENV_VAR_MIN'] }})+'000M')
+))
+
+# Submit Spark job
+submit_spark_job = dsl.ResourceOp(
+    name=spark_submit_job_name,
+    k8s_resource=spark_manifest,
+    action="create",
+    attribute_outputs={
+        "driver_pod_name": "{.status.driverInfo.podName}"
+    },
+    success_condition='status.applicationState.state == COMPLETED'
+)
+
+# Ensure proper label handling
+submit_spark_job.add_pod_label(name='kubeflow/gl_pl_secret_string', value="zc095df900w459piudfkjn54sjdnf")
+submit_spark_job.add_pod_label("pipelines.kubeflow.org/cache_enabled", "false")
+submit_spark_job.add_pod_label("pipelines.kubeflow.org/max_cache_staleness", "P0D")
+
+# Fetch logs from Spark driver pod
+spark_logs_job_name = f"{{ stage }}-driver-logs"
+
+fetch_driver_logs = dsl.ContainerOp(
+    name=spark_logs_job_name,
+    image="{{ image }}",
+    command=["sh", "-c"],
+    arguments=[
+        f"/home/kfp-user/bin/kubectl logs {submit_spark_job.output} > /tmp/driver_pod.log && "
+        "cat /tmp/driver_pod.log && " "sleep 360"
+    ],
+    file_outputs={
+        "driver_logs": "/tmp/driver_pod.log"
+    }
+)
+
+# Ensure `fetch_driver_logs` runs after Spark job
+fetch_driver_logs.after(submit_spark_job)
+fetch_driver_logs.add_pod_label(name='kubeflow/gl_pl_secret_string', value="zc095df900w459piudfkjn54sjdnf")
+fetch_driver_logs.add_pod_label("pipelines.kubeflow.org/cache_enabled", "false")
+fetch_driver_logs.add_pod_label("pipelines.kubeflow.org/max_cache_staleness", "P0D")
+
+# Return both Spark job and logs job
+return submit_spark_job, fetch_driver_logs
+{% endif %}
+
+
+
+
+
+
