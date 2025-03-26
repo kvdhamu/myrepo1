@@ -70,6 +70,53 @@ return submit_spark_job, fetch_driver_logs
 
 
 
+@dsl.pipeline(
+    name='{{ pipeline_name }}',
+    description='{{ pipeline_description }}'
+)
+def pipeline(
+    {% for param in input_params.keys() %}{{ param }}{% if not loop.last %}, {% endif %}{% endfor %}
+):
+    stages = {{ stages | tojson }}
+    previous_stage_tasks = []
+
+    for stage in stages:
+        parallel_tasks = []
+
+        for task_name in stage:
+            # Dynamically create tasks
+            task_result = globals()[f"{task_name.replace('-','_')}"](
+                {% for param in input_params.keys() %}{{ param }}{% if not loop.last %}, {% endif %}{% endfor %}
+            )
+
+            # If Spark task, unpack both jobs (submit_spark_job, fetch_driver_logs)
+            if isinstance(task_result, tuple):
+                submit_spark_job, fetch_driver_logs = task_result
+                parallel_tasks.append(submit_spark_job)
+                parallel_tasks.append(fetch_driver_logs)
+            else:
+                task = task_result
+                parallel_tasks.append(task)
+
+                # Disable caching for non-Spark pod tasks
+                if resources[task_name]['operator'] == 'pod':
+                    task.execution_options.caching_strategy.max_cache_staleness = "P0D"
+                    task.set_caching_options(False)
+
+            # Manage dependencies correctly
+            if previous_stage_tasks:
+                for prev_task in previous_stage_tasks:
+                    task.after(prev_task)
+                    if resources[task_name]['operator'] == 'spark':
+                        fetch_driver_logs.after(submit_spark_job)
+
+        previous_stage_tasks = parallel_tasks
+
+    dsl.get_pipeline_conf().set_ttl_seconds_after_finished(300)
+
+compiler.Compiler().compile(pipeline, '{{pipeline_name}}_{{ run_name }}.yaml')
+
+
 
 
 
