@@ -58,3 +58,26 @@ fetch_driver_logs = dsl.ContainerOp(
         "driver_logs": "/tmp/driver_pod.log"
     }
 )
+
+from kfp import dsl
+
+def check_spark_status_pipeline():
+    monitor_op = dsl.ContainerOp(
+        name="monitor-spark-status",
+        image="bitnami/kubectl:latest",
+        command=["sh", "-c"],
+        arguments=[
+            "while true; do "
+            "  STATUS=$(kubectl get sparkapplication spark-pi -o jsonpath='{.status.applicationState.state}'); "
+            "  echo \"Current status: $STATUS\"; "
+            "  if [ \"$STATUS\" = \"COMPLETED\" ]; then "
+            "    echo \"Spark job succeeded!\"; "
+            "    exit 0; "
+            "  elif [ \"$STATUS\" = \"FAILED\" ]; then "
+            "    echo \"Spark job failed!\"; "
+            "    exit 1; "
+            "  fi; "
+            "  sleep 10; "
+            "done"
+        ]
+    )
