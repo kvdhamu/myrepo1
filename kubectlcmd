@@ -1,0 +1,1 @@
+kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{.spec.taints}{"\n\n"}{end}'
