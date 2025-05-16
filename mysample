@@ -1,1 +1,33 @@
 
+spark_job_resources = manifest.get("spark_job_resources", "")
+
+
+spark_job_resources_value = manifest.get("spark_job_resources", "")
+dsize_spark = 'ADMIN'
+esize_spark = 'ADMIN'
+
+if spark_job_resources_value:
+    parts = spark_job_resources_value.strip().split('-')
+    if len(parts) == 2:
+        dsize_spark, esize_spark = parts
+    elif len(parts) == 1:
+        dsize_spark = esize_spark = parts[0]
+
+# Overwrite default_size with parsed spark sizes
+default_size['SPARK'] = dsize_spark
+
+
+elif is_spark_default:
+    group = 'SPARK'
+    dsize = dsize_spark
+    esize = esize_spark
+    resources[task] = {
+        'group': group,
+        'operator': 'spark',
+        'd_size': dsize,
+        'e_size': esize,
+        'd_resources': resource_mapping[group][dsize.upper()],
+        'e_resources': resource_mapping[group][esize.upper()]
+    }
+
+
