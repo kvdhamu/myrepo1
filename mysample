@@ -1,33 +1,39 @@
-
-spark_job_resources = manifest.get("spark_job_resources", "")
-
-
-spark_job_resources_value = manifest.get("spark_job_resources", "")
-dsize_spark = 'ADMIN'
-esize_spark = 'ADMIN'
-
-if spark_job_resources_value:
-    parts = spark_job_resources_value.strip().split('-')
-    if len(parts) == 2:
-        dsize_spark, esize_spark = parts
-    elif len(parts) == 1:
-        dsize_spark = esize_spark = parts[0]
-
-# Overwrite default_size with parsed spark sizes
-default_size['SPARK'] = dsize_spark
-
-
-elif is_spark_default:
-    group = 'SPARK'
-    dsize = dsize_spark
-    esize = esize_spark
-    resources[task] = {
-        'group': group,
-        'operator': 'spark',
-        'd_size': dsize,
-        'e_size': esize,
-        'd_resources': resource_mapping[group][dsize.upper()],
-        'e_resources': resource_mapping[group][esize.upper()]
+fetch_spark_logs = dsl.ContainerOp(
+    name=spark_logs_job_name,
+    image="{{ image }}",
+    command=["sh", "-c"],
+    arguments=[
+        f"echo {submit_spark_job.outputs['driver_pod_name']} > /tmp/driver_pod && "
+        f"echo {submit_spark_job.outputs['spark_app_name']} > /tmp/spark_app && "
+        "export SPARK_APP_NAME=$(cat /tmp/spark_app) && "
+        "export DRIVER_POD_NAME=$(cat /tmp/driver_pod) && "
+        "echo \"Checking if driver pod $DRIVER_POD_NAME exists...\"; "
+        "if ! /home/kfp-user/bin/kubectl get pod $DRIVER_POD_NAME >/dev/null 2>&1; then "
+        "  echo \"Driver pod $DRIVER_POD_NAME not found!\"; "
+        "  echo \"Fetching driver pod events...\"; "
+        "/home/kfp-user/bin/kubectl describe pod $DRIVER_POD_NAME || true; "
+        "  echo \"Exiting with failure due to missing driver pod.\"; "
+        "  exit 1; "
+        "fi; "
+        "echo \"Monitoring $SPARK_APP_NAME (Spark Job) status every 10 seconds...\"; "
+        "while true; do "
+        "  STATUS=$(/home/kfp-user/bin/kubectl get sparkapplication $SPARK_APP_NAME -o jsonpath='{.status.applicationState.state}'); "
+        "  echo \"Current status: $STATUS at $(date)\"; "
+        "  if [ \"$STATUS\" = \"COMPLETED\" ]; then "
+        "    echo \"Spark job succeeded!\"; "
+        "/home/kfp-user/bin/kubectl logs $DRIVER_POD_NAME > /tmp/driver_pod.log && "
+        "    cat /tmp/driver_pod.log && "
+        "    exit 0; "
+        "  elif [ \"$STATUS\" = \"FAILED\" ]; then "
+        "    echo \"Spark job failed!\"; "
+        "/home/kfp-user/bin/kubectl logs $DRIVER_POD_NAME > /tmp/driver_pod.log && "
+        "    cat /tmp/driver_pod.log && "
+        "    exit 1; "
+        "  fi; "
+        "  sleep 10; "
+        "done"
+    ],
+    file_outputs={
+        "driver_logs": "/tmp/driver_pod.log"
     }
-
-
+)
