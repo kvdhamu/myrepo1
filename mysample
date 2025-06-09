@@ -45,3 +45,65 @@ fetch_spark_logs = dsl.ContainerOp(
         "executor_logs": "/tmp/executor_pods.log"
     }
 )
+
+
+
+
+
+
+fetch_spark_logs = dsl.ContainerOp(
+    name=spark_logs_job_name,
+    image="{{ image }}",
+    command=["sh", "-c"],
+    arguments=[
+        f"echo {submit_spark_job.outputs['driver_pod_name']} > /tmp/driver_pod && "
+        f"echo {submit_spark_job.outputs['spark_app_name']} > /tmp/spark_app && "
+
+        # Load variables
+        "export SPARK_APP_NAME=$(cat /tmp/spark_app) && "
+        "export DRIVER_POD_NAME=$(cat /tmp/driver_pod) && "
+
+        # Check Spark app and driver pod
+        "echo 'Checking SparkApplication and driver pod...'; "
+        "if ! kubectl get sparkapplication $SPARK_APP_NAME >/dev/null 2>&1; then "
+        "  echo 'Spark Application not found.'; exit 1; fi; "
+        "if ! kubectl get pod $DRIVER_POD_NAME >/dev/null 2>&1; then "
+        "  echo 'Driver pod not found!'; exit 1; fi; "
+
+        # Fetch driver logs
+        "echo 'Fetching driver logs...'; "
+        "kubectl logs $DRIVER_POD_NAME > /tmp/driver_pod.log || true; "
+
+        # Extract executorState using jsonpath
+        "echo 'Fetching executor pod logs and statuses...'; "
+        "kubectl get sparkapplication $SPARK_APP_NAME -o jsonpath='{.status.executorState}' > /tmp/executor_state_raw.txt; "
+
+        # Format executorState to key:value format using shell
+        "cat /tmp/executor_state_raw.txt | "
+        "tr -d '{}\"' | tr ',' '\n' | tr ':' ' ' > /tmp/executor_status.txt; "
+
+        # Process each executor pod
+        "touch /tmp/executor_pods.log; "
+        "while read POD STATUS; do "
+        "  echo \"===== Executor Pod: $POD (Status: $STATUS) =====\" >> /tmp/executor_pods.log; "
+        "  if kubectl get pod $POD >/dev/null 2>&1; then "
+        "    kubectl logs $POD >> /tmp/executor_pods.log 2>&1 || echo 'Log fetch failed' >> /tmp/executor_pods.log; "
+        "  else "
+        "    echo 'Executor pod not found!' >> /tmp/executor_pods.log; "
+        "  fi; "
+        "  echo '' >> /tmp/executor_pods.log; "
+        "done < /tmp/executor_status.txt; "
+
+        # Check final application status
+        "STATUS=$(kubectl get sparkapplication $SPARK_APP_NAME -o jsonpath='{.status.applicationState.state}'); "
+        "echo \"Spark job final status: $STATUS\"; "
+        "if [ \"$STATUS\" = \"COMPLETED\" ]; then exit 0; "
+        "elif [ \"$STATUS\" = \"FAILED\" ]; then exit 1; "
+        "else exit 0; fi"
+    ],
+    file_outputs={
+        "driver_logs": "/tmp/driver_pod.log",
+        "executor_logs": "/tmp/executor_pods.log"
+    }
+)
+
