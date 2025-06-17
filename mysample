@@ -12,10 +12,99 @@
 
 
 
-I hope this message finds you well.
+    spark_app_name = f"kfp-{{ stage }}-"
+    spark_submit_job_name = f"{{ stage }}-spark-submit"
+    spark_task_params = spark_tasks_params['tasks'].get("{{ stage }}", {})
 
-I am writing to formally resign from my role, as the chances of a contract extension appear to be minimal. Given the circumstances, I have accepted a temporary opportunity that better supports my current family situation.
+    spark_manifest = yaml.safe_load(spark_manifest_template.render(
+        spark_app_name=spark_app_name,
+        project_namespace=project_namespace,
+        image="{{ image }}",
+        task='{{ stage }}',
+        jar_name=jar_name,
+        environment_vars=env_vars,
+        input_params=input_params,
+        efs_pvc=efs_pvc,
+        env_name=env_name,
+        spark_main_class=spark_task_params.get('mainclass', 'Provide_mainclass_details'),
+        spark_arguments=spark_task_params.get('arguments', []),
+        driver_cpu_limit=str({{ resources[stage]['d_resources']['CPU_ENV_VAR_MAX'] }}),
+        driver_cpu_request=str({{ resources[stage]['d_resources']['CPU_ENV_VAR_MIN'] }}),
+        driver_mem_limit=(str({{ resources[stage]['d_resources']['RAM_ENV_VAR_MAX'] }})+'000M'),
+        driver_mem_request=(str({{ resources[stage]['d_resources']['RAM_ENV_VAR_MIN'] }})+'000M'),
+        executor_cpu_limit=str({{ resources[stage]['e_resources']['CPU_ENV_VAR_MAX'] }}),
+        executor_cpu_request=str({{ resources[stage]['e_resources']['CPU_ENV_VAR_MIN'] }}),
+        executor_mem_limit=(str({{ resources[stage]['e_resources']['RAM_ENV_VAR_MAX'] }})+'000M'),
+        executor_mem_request=(str({{ resources[stage]['e_resources']['RAM_ENV_VAR_MIN'] }})+'000M')
+    ))
 
-I want to sincerely thank you and the entire team for the support, guidance, and collaboration during my time here. It has been a rewarding experience, and I’ve truly valued being part of the team.
+    def cleanup_driver_{{ stage | replace("-", "_") }}():
+        return dsl.ContainerOp(
+            name="cleanup-driver-{{ stage }}",
+            image="{{ image }}",
+            command=["sh", "-c"],
+            arguments=[
+                "echo 'Cleaning up Spark driver pod...'; "
+                "DRIVER_POD_NAME=\"$(cat /tmp/driver_pod)\"; "
+                "echo \"Deleting pod: $DRIVER_POD_NAME\"; "
+                f"/home/kfp-user/bin/kubectl delete pod $DRIVER_POD_NAME --namespace={project_namespace} || true"
+            ],
+        ).add_pvolumes({
+            "/tmp": shared_volume
+        })
 
-Should there be any opportunities in the future, I would be very keen to return and contribute again.
+    with dsl.ExitHandler(cleanup_driver_{{ stage | replace("-", "_") }}()):
+        submit_spark_job = dsl.ResourceOp(
+            name=spark_submit_job_name,
+            k8s_resource=spark_manifest,
+            action="create",
+            attribute_outputs={
+                "submit_exit_status": "{.status.applicationState.state}",
+                "driver_pod_name": "{.status.driverInfo.podName}",
+                "spark_app_name": "{.metadata.name}"
+            },
+            success_condition="status.applicationState.state in (RUNNING, FAILED, COMPLETED)",
+            failure_condition="status.applicationState.state in (SUBMISSION_FAILED)"
+        )
+        submit_spark_job.add_pod_label(name='kubeflow/gl_pl_secret_string', value="zc095df900w459piudfkjn54sjdnf")
+        submit_spark_job.add_pod_label("pipelines.kubeflow.org/cache_enabled", "false")
+        submit_spark_job.add_pod_label("pipelines.kubeflow.org/max_cache_staleness", "P0D")
+
+        fetch_spark_logs = dsl.ContainerOp(
+            name="{{ stage }}-spark-status",
+            image="{{ image }}",
+            command=["sh", "-c"],
+            arguments=[
+                f"echo {submit_spark_job.outputs['driver_pod_name']} > /tmp/driver_pod && "
+                f"echo {submit_spark_job.outputs['spark_app_name']} > /tmp/spark_app && "
+                "export SPARK_APP_NAME=$(cat /tmp/spark_app) && "
+                "export DRIVER_POD_NAME=$(cat /tmp/driver_pod) && "
+                "echo \"Checking if spark application $SPARK_APP_NAME exists...\"; "
+                "if ! /home/kfp-user/bin/kubectl get sparkapplication $SPARK_APP_NAME >/dev/null 2>&1; then "
+                "  echo \"Spark Application $SPARK_APP_NAME not found.\"; exit 1; fi; "
+                "echo \"Checking if driver pod $DRIVER_POD_NAME exists...\"; "
+                "if ! /home/kfp-user/bin/kubectl get pod $DRIVER_POD_NAME >/dev/null 2>&1; then "
+                "  echo \"Driver pod $DRIVER_POD_NAME not found!\"; exit 1; fi; "
+                "echo \"Monitoring $SPARK_APP_NAME status every 10 seconds...\"; "
+                "while true; do "
+                "  STATUS=$(/home/kfp-user/bin/kubectl get sparkapplication $SPARK_APP_NAME -o jsonpath='{.status.applicationState.state}'); "
+                "  echo \"Current status: $STATUS at $(date)\"; "
+                "  if [ \"$STATUS\" = \"COMPLETED\" ]; then "
+                "/home/kfp-user/bin/kubectl logs $DRIVER_POD_NAME > /tmp/driver_pod.log && "
+                "cat /tmp/driver_pod.log && exit 0; "
+                "  elif [ \"$STATUS\" = \"FAILED\" ]; then "
+                "/home/kfp-user/bin/kubectl logs $DRIVER_POD_NAME > /tmp/driver_pod.log && "
+                "cat /tmp/driver_pod.log && exit 1; fi; sleep 10; done"
+            ],
+            file_outputs={"driver_logs": "/tmp/driver_pod.log"}
+        )
+        fetch_spark_logs.add_pod_label(name='kubeflow/gl_pl_secret_string', value="zc095df900w459piudfkjn54sjdnf")
+        fetch_spark_logs.add_pod_label("pipelines.kubeflow.org/cache_enabled", "false")
+        fetch_spark_logs.add_pod_label("pipelines.kubeflow.org/max_cache_staleness", "P0D")
+
+        fetch_spark_logs.after(submit_spark_job)
+
+    return submit_spark_job, fetch_spark_logs
+
+
+
